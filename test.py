@@ -5,10 +5,10 @@ import random
 import time
 import os
 import asyncio
+import aiohttp
 from telegram import Update, InputFile
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-# --- Constants ---
 USER_PRESENCE_MAP = {
     0: "Offline",
     1: "Online",
@@ -17,11 +17,78 @@ USER_PRESENCE_MAP = {
     4: "Invisible"
 }
 
-# --- Bot Token ---
-# IMPORTANT: Replace YOUR_BOT_TOKEN_HERE with your actual bot token
-TOKEN = " " 
+TOKEN = " "
 
-# --- Roblox API Functions ---
+async def make_request(method, node, endpoint, **kwargs):
+    url = f"https://{node}.roblox.com/{endpoint}"
+    timeout = aiohttp.ClientTimeout(total=10)
+    
+    async with aiohttp.ClientSession() as session:
+        async with session.request(method, url, **kwargs) as response:
+            if response.status == 200:
+                data = await response.json()
+                return response.status, data
+            else:
+                return response.status, {}
+
+async def check_verification(user_id: int) -> int:
+    verifhat, verifsign = await asyncio.gather(
+        make_request("GET", "inventory", f"v1/users/{user_id}/items/4/102611803"),
+        make_request("GET", "inventory", f"v1/users/{user_id}/items/4/1567446")
+    )
+    hatOwned = any("type" in item for item in verifhat[1].get("data", []))
+    signOwned = any("type" in item for item in verifsign[1].get("data", []))
+    return 4 if hatOwned and signOwned else 1 if hatOwned else 2 if signOwned else 3
+
+async def last_online(user_id: int):
+    last_data = await make_request("POST", "presence", "v1/presence/last-online", json={"userIds": [user_id]})
+    return last_data[1]["lastOnlineTimestamps"][0]["lastOnline"]
+
+async def get_group(group: int):
+    getGroup, getGroupV1 = await asyncio.gather(
+        make_request("GET", "groups", f"v2/groups?groupIds={group}"),
+        make_request("GET", "groups", f"v1/groups/{group}")
+    )
+    
+    groupName = getGroup[1]['data'][0]['name']
+    groupDescription = getGroup[1]['data'][0]['description']
+    groupCreated = getGroup[1]['data'][0]['created']
+    groupVerified = getGroup[1]['data'][0]['hasVerifiedBadge']
+    
+    if getGroupV1[1]['owner'] is not None:
+        if getGroupV1[1]['owner']['username'] is None: 
+            groupOwner = None
+        else: 
+            groupOwner = [getGroupV1[1]['owner']['username'], getGroupV1[1]['owner']['userId'], getGroupV1[1]['owner']['hasVerifiedBadge']]
+    else: 
+        groupOwner = [False, False, False]
+    
+    if getGroupV1[1]['shout'] is None: 
+        groupShout = None
+    else: 
+        groupShout = [getGroupV1[1]['shout']['body'], getGroupV1[1]['shout']['poster']['username'], getGroupV1[1]['shout']['poster']['userId'], getGroupV1[1]['shout']['poster']['hasVerifiedBadge']]
+    
+    groupMembers = getGroupV1[1]['memberCount']
+    groupPublic = getGroupV1[1]['publicEntryAllowed']
+    
+    if 'isLocked' in getGroupV1[1]: 
+        groupLocked = getGroupV1[1]['isLocked']
+    else: 
+        groupLocked = False
+    
+    return groupName, groupDescription, groupCreated, groupVerified, groupOwner, groupShout, groupMembers, groupPublic, groupLocked
+
+async def get_membership(user: int) -> tuple[bool, bool, bool, bool]:
+    checkBc = await make_request("GET", "inventory", f"v1/users/{user}/items/4/24814192")
+    checkPremium, checkTbc, checkObc = await asyncio.gather(
+        make_request("GET", "premiumfeatures", f"v1/users/{user}/validate-membership"),
+        make_request("GET", "inventory", f"v1/users/{user}/items/4/11895536"),
+        make_request("GET", "inventory", f"v1/users/{user}/items/4/17407931")
+    )
+    ownedBc = any("type" in item for item in checkBc[1].get("data", []))
+    ownedTbc = any("type" in item for item in checkTbc[1].get("data", []))
+    ownedObc = any("type" in item for item in checkObc[1].get("data", []))
+    return checkPremium[1], ownedBc, ownedTbc, ownedObc
 
 def get_user_agent():
     user_agents = [
@@ -100,7 +167,7 @@ def get_previous_usernames(user_id):
     
     return []
 
-def get_groups(user_id):
+async def get_groups_async(user_id):
     url = f"https://groups.roblox.com/v2/users/{user_id}/groups/roles"
     headers = {'User-Agent': get_user_agent()}
     response = requests.get(url, headers=headers)
@@ -109,11 +176,30 @@ def get_groups(user_id):
     if response.status_code == 200:
         data = response.json()
         for group in data['data']:
-            groups.append({
-                'name': group['group']['name'],
-                'link': f"https://www.roblox.com/groups/{group['group']['id']}",
-                'members': group['group']['memberCount']
-            })
+            group_id = group['group']['id']
+            try:
+                group_info = await get_group(group_id)
+                groups.append({
+                    'id': group_id,
+                    'name': group_info[0],
+                    'description': group_info[1],
+                    'created': group_info[2],
+                    'verified': group_info[3],
+                    'owner': group_info[4],
+                    'shout': group_info[5],
+                    'members': group_info[6],
+                    'public': group_info[7],
+                    'isLocked': group_info[8],
+                    'link': f"https://www.roblox.com/groups/{group_id}"
+                })
+            except Exception as e:
+                print(f"Error fetching group {group_id}: {e}")
+                groups.append({
+                    'id': group_id,
+                    'name': group['group']['name'],
+                    'link': f"https://www.roblox.com/groups/{group_id}",
+                    'members': group['group']['memberCount']
+                })
     
     return groups
 
@@ -216,7 +302,7 @@ def get_presence(user_id, headers):
     print("Failed to get presence after retries.")
     return None
 
-def get_user_info(identifier):
+async def get_user_info_async(identifier):
     if identifier.isdigit():
         user_id = identifier
     else:
@@ -241,16 +327,26 @@ def get_user_info(identifier):
         followers_response = requests.get(followers_url, headers=headers)
         followings_response = requests.get(followings_url, headers=headers)
         followers_count = followers_response.json()['count'] if followers_response.status_code == 200 else 0
-        followings_count = followings_response.json()['count'] if followers_response.status_code == 200 else 0
+        followings_count = followings_response.json()['count'] if followings_response.status_code == 200 else 0
        
         presence_info = get_presence(user_id, headers)
         
         previous_usernames = get_previous_usernames(user_id)
-        groups = get_groups(user_id)
+        groups = await get_groups_async(user_id)
         about_me = get_about_me(user_id)
         friends = get_entity_list(user_id, "friends")
         followers = get_entity_list(user_id, "followers")
         followings = get_entity_list(user_id, "followings")
+        
+        verification_status = await check_verification(int(user_id))
+        email_verified = verification_status == 4
+        
+        try:
+            last_online_time = await last_online(int(user_id))
+        except:
+            last_online_time = presence_info.get('last_online') if presence_info else 'N/A'
+
+        hasPremium, ownedBc, ownedTbc, ownedObc = await get_membership(int(user_id))
         
         user_info_data = {
             'user_id': user_id,
@@ -258,7 +354,12 @@ def get_user_info(identifier):
             'display_name': user_data['displayName'],
             'description': user_data.get('description', ''),
             'is_banned': user_data.get('isBanned', False),
+            'email_verified': email_verified,
             'has_verified_badge': user_data.get('hasVerifiedBadge', False),
+            'has_premium': hasPremium,
+            'owned_bc': ownedBc,
+            'owned_tbc': ownedTbc,
+            'owned_obc': ownedObc,
             'friends': friends_count,
             'followers': followers_count,
             'following': followings_count,
@@ -268,50 +369,41 @@ def get_user_info(identifier):
             'about_me': about_me,
             'friends_list': friends,
             'followers_list': followers,
-            'following_list': followings
+            'following_list': followings,
+            'last_online': last_online_time
         }
         
         if presence_info:
             user_info_data['presence_status'] = presence_info.get('status', 'N/A')
             user_info_data['last_location'] = presence_info.get('last_location', 'N/A')
             user_info_data['current_place_id'] = presence_info.get('place_id')
-            user_info_data['last_online_timestamp'] = presence_info.get('last_online')
         else:
             user_info_data['presence_status'] = 'Error fetching presence'
             user_info_data['last_location'] = 'N/A'
             user_info_data['current_place_id'] = None
-            user_info_data['last_online_timestamp'] = 'N/A'
         
         return user_info_data
    
     return None
 
-# --- Telegram Bot Handlers ---
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Send a message when the command /start is issued."""
     await update.message.reply_text("Hi! Send me a Roblox username or ID to get information.")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle incoming text messages."""
     identifier = update.message.text
     
-    # Send the processing message
     await update.message.reply_text(
         "Processing your request. This may take a few minutes due to API limitations. Please be patient."
     )
 
     try:
-        # Run the blocking get_user_info function in a separate thread
-        loop = asyncio.get_running_loop()
-        user_info = await loop.run_in_executor(None, get_user_info, identifier)
+        user_info = await get_user_info_async(identifier)
     except Exception as e:
         print(f"Error in get_user_info for {identifier}: {e}")
         await update.message.reply_text(f"An error occurred while searching: {e}")
         return
 
     if user_info:
-        # Format the reply message
         lines = [
             "Roblox user information:",
             "",
@@ -320,15 +412,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             f"Display_name: {user_info['display_name']}",
             f"Description: {user_info['description']}",
             f"Is_banned: {user_info['is_banned']}",
+            f"Email_verified: {user_info['email_verified']}",
             f"Has_verified_badge: {user_info['has_verified_badge']}",
+            f"Has_premium: {user_info['has_premium']}",
+            f"Owned_bc: {user_info['owned_bc']}",
+            f"Owned_tbc: {user_info['owned_tbc']}",
+            f"Owned_obc: {user_info['owned_obc']}",
             f"Friends: {user_info['friends']}",
             f"Followers: {user_info['followers']}",
             f"Following: {user_info['following']}",
             f"Join_date: {user_info['join_date']}",
+            f"Last_online: {user_info['last_online']}",
             f"Previous_usernames: {', '.join(user_info['previous_usernames']) if user_info['previous_usernames'] else ''}",
             f"About_me: {user_info['about_me']}",
             "",
             "userPresence:",
+            f"Status: {user_info.get('presence_status', '')}",
             f"lastLocation: {user_info.get('last_location', '')}",
             f"placeId: {user_info.get('current_place_id', '')}",
             "",
@@ -338,19 +437,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         message_text = "\n".join(lines)
         await update.message.reply_text(message_text)
         
-        # Define a unique filename for the JSON
         json_filename = f"{user_info['user_id']}_{user_info['alias']}_info.json"
         
         try:
-            # Write the JSON file
             with open(json_filename, 'w', encoding='utf-8') as f:
                 json.dump(user_info, f, indent=4, ensure_ascii=False)
             
-            # Send the JSON file
             with open(json_filename, 'rb') as f:
                 await update.message.reply_document(document=InputFile(f))
             
-            # Clean up the file
             os.remove(json_filename)
             
         except IOError as e:
@@ -361,7 +456,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text("User not found.")
 
 def main() -> None:
-    """Start the bot."""
     
     if TOKEN == "YOUR_BOT_TOKEN_HERE":
         print("="*50)
@@ -370,21 +464,14 @@ def main() -> None:
         print("="*50)
         return
 
-    # Create the Application and pass it your bot's token.
     application = Application.builder().token(TOKEN).build()
 
-    # on different commands - answer in Telegram
     application.add_handler(CommandHandler("start", start))
 
-    # on non command i.e message - echo the message on Telegram
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # Run the bot until the user presses Ctrl-C
     print("Bot is running... Press Ctrl-C to stop.")
     application.run_polling()
 
 if __name__ == '__main__':
     main()
-
-
-
