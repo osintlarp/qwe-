@@ -4,6 +4,7 @@ from bs4 import BeautifulSoup
 import random
 import time
 import os
+import asyncio
 from telegram import Update, InputFile
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
@@ -18,7 +19,7 @@ USER_PRESENCE_MAP = {
 
 # --- Bot Token ---
 # IMPORTANT: Replace YOUR_BOT_TOKEN_HERE with your actual bot token
-TOKEN = "8" 
+TOKEN = " " 
 
 # --- Roblox API Functions ---
 
@@ -261,7 +262,7 @@ def get_user_info(identifier):
         user_info_data = {
             'user_id': user_id,
             'alias': user_data['name'],
-            'display_.': user_data['displayName'],
+            'display_name': user_data['displayName'],
             'description': user_data.get('description', ''),
             'is_banned': user_data.get('isBanned', False),
             'has_verified_badge': user_data.get('hasVerifiedBadge', False),
@@ -309,7 +310,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     try:
         # Run the blocking get_user_info function in a separate thread
-        user_info = await context.application.run_in_thread(get_user_info, identifier)
+        loop = asyncio.get_running_loop()
+        user_info = await loop.run_in_executor(None, get_user_info, identifier)
     except Exception as e:
         print(f"Error in get_user_info for {identifier}: {e}")
         await update.message.reply_text(f"An error occurred while searching: {e}")
@@ -390,5 +392,6 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+
 
 
