@@ -170,14 +170,7 @@ def get_entity_list(user_id, entity_type):
             if not cursor:
                 break
         else:
-            if response.status_code == 429:
-                wait_time = int(response.headers.get('Retry-After', 5))
-                print(f"Rate limited on {entity_type}. Waiting {wait_time} seconds...")
-                time.sleep(wait_time)
-                continue
-            else:
-                print(f"Failed to get {entity_type}. Status: {response.status_code}")
-                break
+            break
         
         time.sleep(1)
     
