@@ -3,10 +3,11 @@ import json
 from bs4 import BeautifulSoup
 import random
 import time
-import argparse
+import os
+from telegram import Update, InputFile
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-# --- Added Presence Type Definitions ---
-# Based on the Roblox API documentation
+# --- Constants ---
 USER_PRESENCE_MAP = {
     0: "Offline",
     1: "Online",
@@ -14,6 +15,12 @@ USER_PRESENCE_MAP = {
     3: "In-Studio",
     4: "Invisible"
 }
+
+# --- Bot Token ---
+# IMPORTANT: Replace YOUR_BOT_TOKEN_HERE with your actual bot token
+TOKEN = "8" 
+
+# --- Roblox API Functions ---
 
 def get_user_agent():
     user_agents = [
@@ -27,20 +34,27 @@ def get_user_agent():
 def request_with_retries(url, headers, max_retries=None):
     retries = 0
     while True:
-        response = requests.get(url, headers=headers)
-        if response.status_code == 200:
-            return response
-        elif response.status_code == 429:
-            wait_time = int(response.headers.get('Retry-After', 5))
-            print(f"Rate limited. Waiting {wait_time} seconds...")
-            time.sleep(wait_time)
-            retries += 1
-        else:
+        try:
+            response = requests.get(url, headers=headers)
+            if response.status_code == 200:
+                return response
+            elif response.status_code == 429:
+                wait_time = int(response.headers.get('Retry-After', 5))
+                print(f"Rate limited. Waiting {wait_time} seconds...")
+                time.sleep(wait_time)
+                retries += 1
+            else:
+                if max_retries and retries >= max_retries:
+                    print(f"Failed to fetch {url} after {max_retries} retries. Status code: {response.status_code}")
+                    return None
+                retries += 1
+                print(f"Request failed with status {response.status_code}. Retrying in 5s... ({retries})")
+                time.sleep(5)
+        except requests.RequestException as e:
+            print(f"Request exception for {url}: {e}")
             if max_retries and retries >= max_retries:
-                print(f"Failed to fetch {url} after {max_retries} retries. Status code: {response.status_code}")
                 return None
             retries += 1
-            print(f"Request failed with status {response.status_code}. Retrying in 5s... ({retries})")
             time.sleep(5)
 
 def search_by_username(username):
@@ -68,7 +82,8 @@ def search_by_username(username):
                     user_id = parts[i + 1]
                     if user_id.isdigit():
                         return user_id
-    except:
+    except Exception as e:
+        print(f"Error in redirect search for {username}: {e}")
         pass
    
     return None
@@ -158,20 +173,17 @@ def get_entity_list(user_id, entity_type):
                 wait_time = int(response.headers.get('Retry-After', 5))
                 print(f"Rate limited on {entity_type}. Waiting {wait_time} seconds...")
                 time.sleep(wait_time)
-                continue # Retry the same cursor
+                continue
             else:
                 print(f"Failed to get {entity_type}. Status: {response.status_code}")
-                break # Break on other errors
+                break
         
         time.sleep(1)
     
     return [{'name': name, 'url': url} for name, url in entities]
 
-# --- New Function Added ---
-# This is the synchronous version of your 'get_precense' function
 def get_presence(user_id, headers):
     url = "https://presence.roblox.com/v1/presence/users"
-    # The API expects a list of integer user IDs
     payload = {"userIds": [int(user_id)]} 
     
     retries = 0
@@ -179,7 +191,6 @@ def get_presence(user_id, headers):
 
     while retries < max_retries:
         try:
-            # Use POST and send data as JSON
             response = requests.post(url, headers=headers, json=payload)
             
             if response.status_code == 200:
@@ -188,21 +199,19 @@ def get_presence(user_id, headers):
                     presence_data = data["userPresences"][0]
                     presence_type = presence_data.get("userPresenceType")
                     
-                    # Return a dictionary with the presence info
                     return {
                         "status": USER_PRESENCE_MAP.get(presence_type, f"Unknown ({presence_type})"),
                         "last_location": presence_data.get("lastLocation", "N/A"),
                         "place_id": presence_data.get("placeId"),
                         "last_online": presence_data.get("lastOnline")
                     }
-                return None # No presence data found in successful response
+                return None
             elif response.status_code == 429:
                 wait_time = int(response.headers.get('Retry-After', 5))
                 print(f"Rate limited on presence API. Waiting {wait_time} seconds...")
                 time.sleep(wait_time)
                 retries += 1
             else:
-                # Other error (400, 500, etc.)
                 print(f"Failed to get presence. Status: {response.status_code}, Response: {response.text}")
                 return None
         except requests.RequestException as e:
@@ -238,9 +247,8 @@ def get_user_info(identifier):
         followers_response = requests.get(followers_url, headers=headers)
         followings_response = requests.get(followings_url, headers=headers)
         followers_count = followers_response.json()['count'] if followers_response.status_code == 200 else 0
-        followings_count = followings_response.json()['count'] if followings_response.status_code == 200 else 0
+        followings_count = followings_response.json()['count'] if followers_response.status_code == 200 else 0
        
-        # --- Call the new presence function ---
         presence_info = get_presence(user_id, headers)
         
         previous_usernames = get_previous_usernames(user_id)
@@ -253,7 +261,7 @@ def get_user_info(identifier):
         user_info_data = {
             'user_id': user_id,
             'alias': user_data['name'],
-            'display_name': user_data['displayName'],
+            'display_.': user_data['displayName'],
             'description': user_data.get('description', ''),
             'is_banned': user_data.get('isBanned', False),
             'has_verified_badge': user_data.get('hasVerifiedBadge', False),
@@ -269,7 +277,6 @@ def get_user_info(identifier):
             'following_list': followings
         }
         
-        # --- Add presence data to the final dictionary ---
         if presence_info:
             user_info_data['presence_status'] = presence_info.get('status', 'N/A')
             user_info_data['last_location'] = presence_info.get('last_location', 'N/A')
@@ -285,60 +292,103 @@ def get_user_info(identifier):
    
     return None
 
-def main():
-    parser = argparse.ArgumentParser(description='Get information about a Roblox user.')
-    parser.add_argument('identifier', help='Roblox username or ID')
-    args = parser.parse_args()
+# --- Telegram Bot Handlers ---
 
-    user_info = get_user_info(args.identifier)
-   
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Send a message when the command /start is issued."""
+    await update.message.reply_text("Hi! Send me a Roblox username or ID to get information.")
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle incoming text messages."""
+    identifier = update.message.text
+    
+    # Send the processing message
+    await update.message.reply_text(
+        "Processing your request. This may take a few minutes due to API limitations. Please be patient."
+    )
+
+    try:
+        # Run the blocking get_user_info function in a separate thread
+        user_info = await context.application.run_in_thread(get_user_info, identifier)
+    except Exception as e:
+        print(f"Error in get_user_info for {identifier}: {e}")
+        await update.message.reply_text(f"An error occurred while searching: {e}")
+        return
+
     if user_info:
-        print(f"--- User Info ---")
-        print(f"User ID: {user_info['user_id']}")
-        print(f"Alias: {user_info['alias']}")
-        print(f"Display Name: {user_info['display_name']}")
-        print(f"Description: {user_info['description']}")
-        print(f"Banned: {'Yes' if user_info['is_banned'] else 'No'}")
-        print(f"Verified Badge: {'Yes' if user_info['has_verified_badge'] else 'No'}")
-        print(f"Join Date: {user_info['join_date']}")
+        # Format the reply message
+        lines = [
+            "Roblox user information:",
+            "",
+            f"User_id: {user_info['user_id']}",
+            f"Alias: {user_info['alias']}",
+            f"Display_name: {user_info['display_name']}",
+            f"Description: {user_info['description']}",
+            f"Is_banned: {user_info['is_banned']}",
+            f"Has_verified_badge: {user_info['has_verified_badge']}",
+            f"Friends: {user_info['friends']}",
+            f"Followers: {user_info['followers']}",
+            f"Following: {user_info['following']}",
+            f"Join_date: {user_info['join_date']}",
+            f"Previous_usernames: {', '.join(user_info['previous_usernames']) if user_info['previous_usernames'] else ''}",
+            f"About_me: {user_info['about_me']}",
+            "",
+            "userPresence:",
+            f"lastLocation: {user_info.get('last_location', '')}",
+            f"placeId: {user_info.get('current_place_id', '')}",
+            "",
+            f"Profile URL: https://www.roblox.com/users/{user_info['user_id']}/profile"
+        ]
         
-        print(f"\n--- Stats ---")
-        print(f"Friends: {user_info['friends']}")
-        print(f"Followers: {user_info['followers']}")
-        print(f"Following: {user_info['following']}")
+        message_text = "\n".join(lines)
+        await update.message.reply_text(message_text)
         
-        print(f"\n--- Presence ---")
-        print(f"Status: {user_info['presence_status']}")
-        print(f"Last Location: {user_info['last_location']}")
-        if user_info['current_place_id']:
-            print(f"Current Place ID: {user_info['current_place_id']}")
-        print(f"Last Online: {user_info['last_online_timestamp']}")
-        
-        print(f"\n--- History & Profile ---")
-        print(f"Previous Usernames: {', '.join(user_info['previous_usernames']) if user_info['previous_usernames'] else 'None detected'}")
-        print(f"About Me: {user_info['about_me']}")
-        
-        print("\n--- Groups ---")
-        if user_info['groups']:
-            for group in user_info['groups']:
-                print(f"- {group['name']} ({group['members']} members)")
-                print(f"  Link: {group['link']}")
-        else:
-            print("No groups found.")
-        
-        # Define a JSON filename based on the user
+        # Define a unique filename for the JSON
         json_filename = f"{user_info['user_id']}_{user_info['alias']}_info.json"
         
-        # Write all collected data to a single JSON file
         try:
+            # Write the JSON file
             with open(json_filename, 'w', encoding='utf-8') as f:
                 json.dump(user_info, f, indent=4, ensure_ascii=False)
-            print(f"\nSuccessfully exported all user information to '{json_filename}'")
+            
+            # Send the JSON file
+            with open(json_filename, 'rb') as f:
+                await update.message.reply_document(document=InputFile(f))
+            
+            # Clean up the file
+            os.remove(json_filename)
+            
         except IOError as e:
-            print(f"\nError writing to JSON file: {e}")
+            print(f"Error writing or sending JSON file: {e}")
+            await update.message.reply_text(f"Error creating JSON file: {e}")
         
     else:
-        print("User not found.")
+        await update.message.reply_text("User not found.")
+
+def main() -> None:
+    """Start the bot."""
+    
+    if TOKEN == "YOUR_BOT_TOKEN_HERE":
+        print("="*50)
+        print("ERROR: Please add your Telegram Bot Token to the script.")
+        print("Open roblox_bot.py and replace 'YOUR_BOT_TOKEN_HERE' with your token.")
+        print("="*50)
+        return
+
+    # Create the Application and pass it your bot's token.
+    application = Application.builder().token(TOKEN).build()
+
+    # on different commands - answer in Telegram
+    application.add_handler(CommandHandler("start", start))
+
+    # on non command i.e message - echo the message on Telegram
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    # Run the bot until the user presses Ctrl-C
+    print("Bot is running... Press Ctrl-C to stop.")
+    application.run_polling()
 
 if __name__ == '__main__':
     main()
+
+
