@@ -8,7 +8,6 @@ import asyncio
 from telegram import Update, InputFile
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-# --- Constants ---
 USER_PRESENCE_MAP = {
     0: "Offline",
     1: "Online",
@@ -17,11 +16,7 @@ USER_PRESENCE_MAP = {
     4: "Invisible"
 }
 
-# --- Bot Token ---
-# IMPORTANT: Replace YOUR_BOT_TOKEN_HERE with your actual bot token
-TOKEN = " " 
-
-# --- Roblox API Functions ---
+TOKEN = "" 
 
 def get_user_agent():
     user_agents = [
@@ -241,7 +236,7 @@ def get_user_info(identifier):
         followers_response = requests.get(followers_url, headers=headers)
         followings_response = requests.get(followings_url, headers=headers)
         followers_count = followers_response.json()['count'] if followers_response.status_code == 200 else 0
-        followings_count = followings_response.json()['count'] if followers_response.status_code == 200 else 0
+        followings_count = followings_response.json()['count'] if followings_response.status_code == 200 else 0
        
         presence_info = get_presence(user_id, headers)
         
@@ -286,23 +281,17 @@ def get_user_info(identifier):
    
     return None
 
-# --- Telegram Bot Handlers ---
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Send a message when the command /start is issued."""
     await update.message.reply_text("Hi! Send me a Roblox username or ID to get information.")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle incoming text messages."""
     identifier = update.message.text
     
-    # Send the processing message
     await update.message.reply_text(
         "Processing your request. This may take a few minutes due to API limitations. Please be patient."
     )
 
     try:
-        # Run the blocking get_user_info function in a separate thread
         loop = asyncio.get_running_loop()
         user_info = await loop.run_in_executor(None, get_user_info, identifier)
     except Exception as e:
@@ -311,7 +300,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     if user_info:
-        # Format the reply message
         lines = [
             "Roblox user information:",
             "",
@@ -329,8 +317,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             f"About_me: {user_info['about_me']}",
             "",
             "userPresence:",
+            f"Status: {user_info.get('presence_status', '')}",
             f"lastLocation: {user_info.get('last_location', '')}",
             f"placeId: {user_info.get('current_place_id', '')}",
+            f"lastOnline: {user_info.get('last_online_timestamp', '')}",
             "",
             f"Profile URL: https://www.roblox.com/users/{user_info['user_id']}/profile"
         ]
@@ -338,19 +328,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         message_text = "\n".join(lines)
         await update.message.reply_text(message_text)
         
-        # Define a unique filename for the JSON
         json_filename = f"{user_info['user_id']}_{user_info['alias']}_info.json"
         
         try:
-            # Write the JSON file
             with open(json_filename, 'w', encoding='utf-8') as f:
                 json.dump(user_info, f, indent=4, ensure_ascii=False)
             
-            # Send the JSON file
             with open(json_filename, 'rb') as f:
                 await update.message.reply_document(document=InputFile(f))
             
-            # Clean up the file
             os.remove(json_filename)
             
         except IOError as e:
@@ -361,29 +347,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text("User not found.")
 
 def main() -> None:
-    """Start the bot."""
-    
-    if TOKEN == "YOUR_BOT_TOKEN_HERE":
+    if TOKEN == "YOUR_BOT_TOKEN_HERE" or TOKEN == " ":
         print("="*50)
         print("ERROR: Please add your Telegram Bot Token to the script.")
-        print("Open roblox_bot.py and replace 'YOUR_BOT_TOKEN_HERE' with your token.")
+        print("Open the script and replace ' ' with your token.")
         print("="*50)
         return
 
-    # Create the Application and pass it your bot's token.
     application = Application.builder().token(TOKEN).build()
 
-    # on different commands - answer in Telegram
     application.add_handler(CommandHandler("start", start))
 
-    # on non command i.e message - echo the message on Telegram
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # Run the bot until the user presses Ctrl-C
     print("Bot is running... Press Ctrl-C to stop.")
     application.run_polling()
 
 if __name__ == '__main__':
     main()
-
-
