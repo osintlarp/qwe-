@@ -8,6 +8,7 @@ import asyncio
 from telegram import Update, InputFile
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
+# --- Constants ---
 USER_PRESENCE_MAP = {
     0: "Offline",
     1: "Online",
@@ -16,7 +17,11 @@ USER_PRESENCE_MAP = {
     4: "Invisible"
 }
 
-TOKEN = "Y" 
+# --- Bot Token ---
+# IMPORTANT: Replace YOUR_BOT_TOKEN_HERE with your actual bot token
+TOKEN = " " 
+
+# --- Roblox API Functions ---
 
 def get_user_agent():
     user_agents = [
@@ -104,29 +109,10 @@ def get_groups(user_id):
     if response.status_code == 200:
         data = response.json()
         for group in data['data']:
-            group_id = group['group']['id']
-            group_owner_info = [False, False, False]
-            
-            url_v1 = f"https://groups.roblox.com/v1/groups/{group_id}"
-            response_v1 = requests.get(url_v1, headers=headers)
-            
-            if response_v1.status_code == 200:
-                data_v1 = response_v1.json()
-                if data_v1.get('owner'):
-                    if data_v1['owner'].get('username'):
-                        group_owner_info = [
-                            data_v1['owner']['username'],
-                            data_v1['owner']['userId'],
-                            data_v1['owner'].get('hasVerifiedBadge', False)
-                        ]
-            
             groups.append({
                 'name': group['group']['name'],
-                'link': f"https://www.roblox.com/groups/{group_id}",
-                'members': group['group']['memberCount'],
-                'owner_username': group_owner_info[0],
-                'owner_id': group_owner_info[1],
-                'owner_verified': group_owner_info[2]
+                'link': f"https://www.roblox.com/groups/{group['group']['id']}",
+                'members': group['group']['memberCount']
             })
     
     return groups
@@ -300,17 +286,23 @@ def get_user_info(identifier):
    
     return None
 
+# --- Telegram Bot Handlers ---
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Send a message when the command /start is issued."""
     await update.message.reply_text("Hi! Send me a Roblox username or ID to get information.")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle incoming text messages."""
     identifier = update.message.text
     
+    # Send the processing message
     await update.message.reply_text(
         "Processing your request. This may take a few minutes due to API limitations. Please be patient."
     )
 
     try:
+        # Run the blocking get_user_info function in a separate thread
         loop = asyncio.get_running_loop()
         user_info = await loop.run_in_executor(None, get_user_info, identifier)
     except Exception as e:
@@ -319,6 +311,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     if user_info:
+        # Format the reply message
         lines = [
             "Roblox user information:",
             "",
@@ -345,15 +338,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         message_text = "\n".join(lines)
         await update.message.reply_text(message_text)
         
+        # Define a unique filename for the JSON
         json_filename = f"{user_info['user_id']}_{user_info['alias']}_info.json"
         
         try:
+            # Write the JSON file
             with open(json_filename, 'w', encoding='utf-8') as f:
                 json.dump(user_info, f, indent=4, ensure_ascii=False)
             
+            # Send the JSON file
             with open(json_filename, 'rb') as f:
                 await update.message.reply_document(document=InputFile(f))
             
+            # Clean up the file
             os.remove(json_filename)
             
         except IOError as e:
@@ -364,6 +361,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text("User not found.")
 
 def main() -> None:
+    """Start the bot."""
+    
     if TOKEN == "YOUR_BOT_TOKEN_HERE":
         print("="*50)
         print("ERROR: Please add your Telegram Bot Token to the script.")
@@ -371,13 +370,20 @@ def main() -> None:
         print("="*50)
         return
 
+    # Create the Application and pass it your bot's token.
     application = Application.builder().token(TOKEN).build()
 
+    # on different commands - answer in Telegram
     application.add_handler(CommandHandler("start", start))
+
+    # on non command i.e message - echo the message on Telegram
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
+    # Run the bot until the user presses Ctrl-C
     print("Bot is running... Press Ctrl-C to stop.")
     application.run_polling()
 
 if __name__ == '__main__':
     main()
+
+
