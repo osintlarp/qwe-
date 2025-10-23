@@ -19,77 +19,6 @@ USER_PRESENCE_MAP = {
 
 TOKEN = " "
 
-async def make_request(method, node, endpoint, **kwargs):
-    url = f"https://{node}.roblox.com/{endpoint}"
-    timeout = aiohttp.ClientTimeout(total=10)
-    
-    async with aiohttp.ClientSession() as session:
-        async with session.request(method, url, **kwargs) as response:
-            if response.status == 200:
-                data = await response.json()
-                return response.status, data
-            else:
-                return response.status, {}
-
-async def check_verification(user_id: int) -> int:
-    verifhat, verifsign = await asyncio.gather(
-        make_request("GET", "inventory", f"v1/users/{user_id}/items/4/102611803"),
-        make_request("GET", "inventory", f"v1/users/{user_id}/items/4/1567446")
-    )
-    hatOwned = any("type" in item for item in verifhat[1].get("data", []))
-    signOwned = any("type" in item for item in verifsign[1].get("data", []))
-    return 4 if hatOwned and signOwned else 1 if hatOwned else 2 if signOwned else 3
-
-async def last_online(user_id: int):
-    last_data = await make_request("POST", "presence", "v1/presence/last-online", json={"userIds": [user_id]})
-    return last_data[1]["lastOnlineTimestamps"][0]["lastOnline"]
-
-async def get_group(group: int):
-    getGroup, getGroupV1 = await asyncio.gather(
-        make_request("GET", "groups", f"v2/groups?groupIds={group}"),
-        make_request("GET", "groups", f"v1/groups/{group}")
-    )
-    
-    groupName = getGroup[1]['data'][0]['name']
-    groupDescription = getGroup[1]['data'][0]['description']
-    groupCreated = getGroup[1]['data'][0]['created']
-    groupVerified = getGroup[1]['data'][0]['hasVerifiedBadge']
-    
-    if getGroupV1[1]['owner'] is not None:
-        if getGroupV1[1]['owner']['username'] is None: 
-            groupOwner = None
-        else: 
-            groupOwner = [getGroupV1[1]['owner']['username'], getGroupV1[1]['owner']['userId'], getGroupV1[1]['owner']['hasVerifiedBadge']]
-    else: 
-        groupOwner = [False, False, False]
-    
-    if getGroupV1[1]['shout'] is None: 
-        groupShout = None
-    else: 
-        groupShout = [getGroupV1[1]['shout']['body'], getGroupV1[1]['shout']['poster']['username'], getGroupV1[1]['shout']['poster']['userId'], getGroupV1[1]['shout']['poster']['hasVerifiedBadge']]
-    
-    groupMembers = getGroupV1[1]['memberCount']
-    groupPublic = getGroupV1[1]['publicEntryAllowed']
-    
-    if 'isLocked' in getGroupV1[1]: 
-        groupLocked = getGroupV1[1]['isLocked']
-    else: 
-        groupLocked = False
-    
-    return groupName, groupDescription, groupCreated, groupVerified, groupOwner, groupShout, groupMembers, groupPublic, groupLocked
-
-async def get_membership(user: int) -> tuple[bool, bool, bool, bool]:
-    checkBc = await make_request("GET", "inventory", f"v1/users/{user}/items/4/24814192")
-    checkPremium, checkTbc, checkObc = await asyncio.gather(
-        make_request("GET", "premiumfeatures", f"v1/users/{user}/validate-membership"),
-        make_request("GET", "inventory", f"v1/users/{user}/items/4/11895536"),
-        make_request("GET", "inventory", f"v1/users/{user}/items/4/17407931")
-    )
-    ownedBc = any("type" in item for item in checkBc[1].get("data", []))
-    ownedTbc = any("type" in item for item in checkTbc[1].get("data", []))
-    ownedObc = any("type" in item for item in checkObc[1].get("data", []))
-    return checkPremium[1], ownedBc, ownedTbc, ownedObc
-
 def get_user_agent():
     user_agents = [
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
@@ -99,31 +28,160 @@ def get_user_agent():
     ]
     return random.choice(user_agents)
 
-def request_with_retries(url, headers, max_retries=None):
-    retries = 0
-    while True:
+async def make_request(method, node, endpoint, max_retries=3, **kwargs):
+    url = f"https://{node}.roblox.com/{endpoint}"
+    headers = {'User-Agent': get_user_agent()}
+    
+    if 'headers' in kwargs:
+        headers.update(kwargs.pop('headers'))
+    
+    for attempt in range(max_retries):
         try:
-            response = requests.get(url, headers=headers)
+            timeout = aiohttp.ClientTimeout(total=10)
+            async with aiohttp.ClientSession(headers=headers) as session:
+                async with session.request(method, url, timeout=timeout, **kwargs) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        return response.status, data
+                    elif response.status == 429:
+                        wait_time = int(response.headers.get('Retry-After', 5))
+                        print(f"Rate limited. Waiting {wait_time} seconds...")
+                        await asyncio.sleep(wait_time)
+                        continue
+                    else:
+                        print(f"Request failed with status {response.status}")
+                        return response.status, {}
+        except aiohttp.ClientConnectionError as e:
+            print(f"Connection error on attempt {attempt + 1}: {e}")
+            if attempt < max_retries - 1:
+                wait_time = (attempt + 1) * 2
+                print(f"Retrying in {wait_time} seconds...")
+                await asyncio.sleep(wait_time)
+                continue
+            else:
+                return 0, {}
+        except asyncio.TimeoutError:
+            print(f"Timeout on attempt {attempt + 1}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep((attempt + 1) * 2)
+                continue
+            else:
+                return 0, {}
+        except Exception as e:
+            print(f"Unexpected error on attempt {attempt + 1}: {e}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep((attempt + 1) * 2)
+                continue
+            else:
+                return 0, {}
+    
+    return 0, {}
+
+async def check_verification(user_id: int) -> int:
+    try:
+        verifhat, verifsign = await asyncio.gather(
+            make_request("GET", "inventory", f"v1/users/{user_id}/items/4/102611803"),
+            make_request("GET", "inventory", f"v1/users/{user_id}/items/4/1567446")
+        )
+        hatOwned = any("type" in item for item in verifhat[1].get("data", [])) if verifhat[0] == 200 else False
+        signOwned = any("type" in item for item in verifsign[1].get("data", [])) if verifsign[0] == 200 else False
+        return 4 if hatOwned and signOwned else 1 if hatOwned else 2 if signOwned else 3
+    except Exception as e:
+        print(f"Error in check_verification: {e}")
+        return 3
+
+async def last_online(user_id: int):
+    try:
+        last_data = await make_request("POST", "presence", "v1/presence/last-online", json={"userIds": [user_id]})
+        if last_data[0] == 200 and "lastOnlineTimestamps" in last_data[1]:
+            return last_data[1]["lastOnlineTimestamps"][0]["lastOnline"]
+        return "N/A"
+    except Exception as e:
+        print(f"Error in last_online: {e}")
+        return "N/A"
+
+async def get_group(group: int):
+    try:
+        getGroup, getGroupV1 = await asyncio.gather(
+            make_request("GET", "groups", f"v2/groups?groupIds={group}"),
+            make_request("GET", "groups", f"v1/groups/{group}")
+        )
+        
+        if getGroup[0] != 200 or getGroupV1[0] != 200:
+            return "Unknown", "Unknown", "Unknown", False, [False, False, False], None, 0, False, False
+        
+        groupName = getGroup[1]['data'][0]['name']
+        groupDescription = getGroup[1]['data'][0]['description']
+        groupCreated = getGroup[1]['data'][0]['created']
+        groupVerified = getGroup[1]['data'][0]['hasVerifiedBadge']
+        
+        if getGroupV1[1]['owner'] is not None:
+            if getGroupV1[1]['owner']['username'] is None: 
+                groupOwner = None
+            else: 
+                groupOwner = [getGroupV1[1]['owner']['username'], getGroupV1[1]['owner']['userId'], getGroupV1[1]['owner']['hasVerifiedBadge']]
+        else: 
+            groupOwner = [False, False, False]
+        
+        if getGroupV1[1]['shout'] is None: 
+            groupShout = None
+        else: 
+            groupShout = [getGroupV1[1]['shout']['body'], getGroupV1[1]['shout']['poster']['username'], getGroupV1[1]['shout']['poster']['userId'], getGroupV1[1]['shout']['poster']['hasVerifiedBadge']]
+        
+        groupMembers = getGroupV1[1]['memberCount']
+        groupPublic = getGroupV1[1]['publicEntryAllowed']
+        
+        if 'isLocked' in getGroupV1[1]: 
+            groupLocked = getGroupV1[1]['isLocked']
+        else: 
+            groupLocked = False
+        
+        return groupName, groupDescription, groupCreated, groupVerified, groupOwner, groupShout, groupMembers, groupPublic, groupLocked
+    except Exception as e:
+        print(f"Error in get_group: {e}")
+        return "Unknown", "Unknown", "Unknown", False, [False, False, False], None, 0, False, False
+
+async def get_membership(user: int) -> tuple[bool, bool, bool, bool]:
+    try:
+        checkBc = await make_request("GET", "inventory", f"v1/users/{user}/items/4/24814192")
+        checkPremium, checkTbc, checkObc = await asyncio.gather(
+            make_request("GET", "premiumfeatures", f"v1/users/{user}/validate-membership"),
+            make_request("GET", "inventory", f"v1/users/{user}/items/4/11895536"),
+            make_request("GET", "inventory", f"v1/users/{user}/items/4/17407931")
+        )
+        ownedBc = any("type" in item for item in checkBc[1].get("data", [])) if checkBc[0] == 200 else False
+        ownedTbc = any("type" in item for item in checkTbc[1].get("data", [])) if checkTbc[0] == 200 else False
+        ownedObc = any("type" in item for item in checkObc[1].get("data", [])) if checkObc[0] == 200 else False
+        hasPremium = checkPremium[1] if checkPremium[0] == 200 else False
+        return hasPremium, ownedBc, ownedTbc, ownedObc
+    except Exception as e:
+        print(f"Error in get_membership: {e}")
+        return False, False, False, False
+
+def request_with_retries(url, headers, max_retries=3):
+    for attempt in range(max_retries):
+        try:
+            response = requests.get(url, headers=headers, timeout=10)
             if response.status_code == 200:
                 return response
             elif response.status_code == 429:
                 wait_time = int(response.headers.get('Retry-After', 5))
                 print(f"Rate limited. Waiting {wait_time} seconds...")
                 time.sleep(wait_time)
-                retries += 1
+                continue
             else:
-                if max_retries and retries >= max_retries:
-                    print(f"Failed to fetch {url} after {max_retries} retries. Status code: {response.status_code}")
-                    return None
-                retries += 1
-                print(f"Request failed with status {response.status_code}. Retrying in 5s... ({retries})")
-                time.sleep(5)
-        except requests.RequestException as e:
-            print(f"Request exception for {url}: {e}")
-            if max_retries and retries >= max_retries:
+                print(f"Request failed with status {response.status_code}")
+                if attempt < max_retries - 1:
+                    time.sleep((attempt + 1) * 2)
+                    continue
                 return None
-            retries += 1
-            time.sleep(5)
+        except requests.exceptions.RequestException as e:
+            print(f"Request exception on attempt {attempt + 1}: {e}")
+            if attempt < max_retries - 1:
+                time.sleep((attempt + 1) * 2)
+                continue
+            return None
+    return None
 
 def search_by_username(username):
     url = f"https://users.roblox.com/v1/users/search?keyword={username}&limit=10"
@@ -141,7 +199,7 @@ def search_by_username(username):
     try:
         url = f"https://www.roblox.com/users/profile?username={username}"
         headers = {'User-Agent': get_user_agent()}
-        response = requests.get(url, headers=headers, allow_redirects=True)
+        response = requests.get(url, headers=headers, allow_redirects=True, timeout=10)
         
         if response.status_code == 200 and 'users' in response.url:
             parts = response.url.split('/')
@@ -159,9 +217,9 @@ def search_by_username(username):
 def get_previous_usernames(user_id):
     url = f"https://users.roblox.com/v1/users/{user_id}/username-history?limit=100&sortOrder=Asc"
     headers = {'User-Agent': get_user_agent()}
-    response = requests.get(url, headers=headers)
+    response = request_with_retries(url, headers)
     
-    if response.status_code == 200:
+    if response and response.status_code == 200:
         data = response.json()
         return [entry['name'] for entry in data['data']]
     
@@ -170,10 +228,10 @@ def get_previous_usernames(user_id):
 async def get_groups_async(user_id):
     url = f"https://groups.roblox.com/v2/users/{user_id}/groups/roles"
     headers = {'User-Agent': get_user_agent()}
-    response = requests.get(url, headers=headers)
+    response = request_with_retries(url, headers)
     
     groups = []
-    if response.status_code == 200:
+    if response and response.status_code == 200:
         data = response.json()
         for group in data['data']:
             group_id = group['group']['id']
@@ -206,9 +264,9 @@ async def get_groups_async(user_id):
 def get_about_me(user_id):
     url = f"https://www.roblox.com/users/{user_id}/profile"
     headers = {'User-Agent': get_user_agent()}
-    response = requests.get(url, headers=headers)
+    response = request_with_retries(url, headers)
     
-    if response.status_code == 200:
+    if response and response.status_code == 200:
         soup = BeautifulSoup(response.text, 'html.parser')
         about_me = soup.find('span', class_='profile-about-content-text linkify')
         if about_me:
@@ -226,39 +284,53 @@ def get_entity_list(user_id, entity_type):
     entities = set()  
     cursor = ""
     
-    while True:
-        url = f"https://friends.roblox.com/v1/users/{user_id}/{entity_type}?limit=100&cursor={cursor}"
-        headers = {'User-Agent': get_user_agent()}
-        response = requests.get(url, headers=headers)
-        
-        if response.status_code == 200:
-            data = response.json()
-            for entity in data['data']:
-                if 'displayName' in entity:
-                    name = entity.get('displayName') or entity.get('username', 'Usuario sin nombre')
-                    entity_id = entity.get('id', '')
-                elif 'name' in entity:
-                    name = entity['name']
-                    entity_id = entity['id']
-                elif 'user' in entity and isinstance(entity['user'], dict):
-                    user_data = entity['user']
-                    name = user_data.get('displayName') or user_data.get('name', 'Usuario sin nombre')
-                    entity_id = user_data.get('id', '')
-                else:
-                    available_keys = list(entity.keys())
-                    name = f"Usuario {available_keys}"
-                    entity_id = entity.get('id', '')
+    for attempt in range(3):
+        try:
+            while True:
+                url = f"https://friends.roblox.com/v1/users/{user_id}/{entity_type}?limit=100&cursor={cursor}"
+                headers = {'User-Agent': get_user_agent()}
+                response = requests.get(url, headers=headers, timeout=10)
                 
-                if entity_id:
-                    entities.add((name, f"https://www.roblox.com/users/{entity_id}/profile"))
-            
-            cursor = data.get('nextPageCursor')
-            if not cursor:
-                break
-        else:
+                if response.status_code == 200:
+                    data = response.json()
+                    for entity in data['data']:
+                        if 'displayName' in entity:
+                            name = entity.get('displayName') or entity.get('username', 'Usuario sin nombre')
+                            entity_id = entity.get('id', '')
+                        elif 'name' in entity:
+                            name = entity['name']
+                            entity_id = entity['id']
+                        elif 'user' in entity and isinstance(entity['user'], dict):
+                            user_data = entity['user']
+                            name = user_data.get('displayName') or user_data.get('name', 'Usuario sin nombre')
+                            entity_id = user_data.get('id', '')
+                        else:
+                            available_keys = list(entity.keys())
+                            name = f"Usuario {available_keys}"
+                            entity_id = entity.get('id', '')
+                        
+                        if entity_id:
+                            entities.add((name, f"https://www.roblox.com/users/{entity_id}/profile"))
+                    
+                    cursor = data.get('nextPageCursor')
+                    if not cursor:
+                        break
+                elif response.status_code == 429:
+                    wait_time = int(response.headers.get('Retry-After', 5))
+                    print(f"Rate limited. Waiting {wait_time} seconds...")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    break
+                
+                time.sleep(1)
             break
-        
-        time.sleep(1)
+        except requests.exceptions.RequestException as e:
+            print(f"Request exception on attempt {attempt + 1}: {e}")
+            if attempt < 2:
+                time.sleep((attempt + 1) * 2)
+                continue
+            break
     
     return [{'name': name, 'url': url} for name, url in entities]
 
@@ -266,12 +338,9 @@ def get_presence(user_id, headers):
     url = "https://presence.roblox.com/v1/presence/users"
     payload = {"userIds": [int(user_id)]} 
     
-    retries = 0
-    max_retries = 3
-
-    while retries < max_retries:
+    for attempt in range(3):
         try:
-            response = requests.post(url, headers=headers, json=payload)
+            response = requests.post(url, headers=headers, json=payload, timeout=10)
             
             if response.status_code == 200:
                 data = response.json()
@@ -290,16 +359,20 @@ def get_presence(user_id, headers):
                 wait_time = int(response.headers.get('Retry-After', 5))
                 print(f"Rate limited on presence API. Waiting {wait_time} seconds...")
                 time.sleep(wait_time)
-                retries += 1
+                continue
             else:
-                print(f"Failed to get presence. Status: {response.status_code}, Response: {response.text}")
+                print(f"Failed to get presence. Status: {response.status_code}")
+                if attempt < 2:
+                    time.sleep((attempt + 1) * 2)
+                    continue
                 return None
-        except requests.RequestException as e:
-            print(f"Error during presence request: {e}")
-            time.sleep(5)
-            retries += 1
+        except requests.exceptions.RequestException as e:
+            print(f"Error during presence request on attempt {attempt + 1}: {e}")
+            if attempt < 2:
+                time.sleep((attempt + 1) * 2)
+                continue
+            return None
     
-    print("Failed to get presence after retries.")
     return None
 
 async def get_user_info_async(identifier):
@@ -319,13 +392,13 @@ async def get_user_info_async(identifier):
         user_data = user_response.json()
        
         friends_url = f"https://friends.roblox.com/v1/users/{user_id}/friends/count"
-        friends_response = requests.get(friends_url, headers=headers)
+        friends_response = requests.get(friends_url, headers=headers, timeout=10)
         friends_count = friends_response.json()['count'] if friends_response.status_code == 200 else 0
        
         followers_url = f"https://friends.roblox.com/v1/users/{user_id}/followers/count"
         followings_url = f"https://friends.roblox.com/v1/users/{user_id}/followings/count"
-        followers_response = requests.get(followers_url, headers=headers)
-        followings_response = requests.get(followings_url, headers=headers)
+        followers_response = requests.get(followers_url, headers=headers, timeout=10)
+        followings_response = requests.get(followings_url, headers=headers, timeout=10)
         followers_count = followers_response.json()['count'] if followers_response.status_code == 200 else 0
         followings_count = followings_response.json()['count'] if followings_response.status_code == 200 else 0
        
